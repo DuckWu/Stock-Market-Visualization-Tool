@@ -32,7 +32,7 @@ export function StockAnalysis({ symbol, price, change, volume }: StockAnalysisPr
       
       try {
         // Call our backend endpoint that uses DeepSeek
-        const response = await axios.post('http://localhost:3002/stock-market/analyze', {
+        const response = await axios.post('http://3.148.170.36:3002/stock-market/analyze', {
           symbol,
           price,
           change,

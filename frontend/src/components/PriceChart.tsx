@@ -33,7 +33,7 @@ export function PriceChart({ symbol, timeframe = '1m' }: PriceChartProps) {
       
       try {
         // Try to fetch from backend API with increased timeout
-        const response = await axios.get(`http://localhost:3002/stock-market/daily?symbol=${symbol}`, {
+        const response = await axios.get(`http://3.148.170.36:3002/stock-market/daily?symbol=${symbol}`, {
           timeout: 8000 // 8 second timeout for better success rate
         });
         
