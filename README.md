@@ -37,6 +37,7 @@ A modern web application that provides real-time stock market data visualization
 ### Backend (.env)
 ```
 QWEN_API_KEY=your_huggingface_api_key_here
+PORT=3002
 ```
 
 ## Installation
