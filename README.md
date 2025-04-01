@@ -1,89 +1,110 @@
-# Stock Market Dashboard
+# Stock Market Analysis Dashboard
 
-A modern web application for visualizing stock market data using Next.js, NestJS, and D3.js.
+A modern web application that provides real-time stock market data visualization and AI-powered analysis using NestJS backend and Next.js frontend.
 
 ## Features
 
-- Real-time stock market data visualization
-- Interactive charts and graphs
-- Daily and intraday data views
-- Modern, responsive UI
-- Three different visualization types:
-  - Line chart for price trends
-  - Bar chart for volume analysis
-  - Swarm plot for price distribution
+- 📈 Real-time stock data visualization
+- 🔍 Interactive stock search and selection
+- 📊 Price and volume charts
+- 🤖 AI-powered stock analysis using Hugging Face
+- 📱 Responsive design
+- 🌐 Real-time data from Yahoo Finance
+
+## Tech Stack
+
+### Backend
+- NestJS
+- TypeScript
+- Yahoo Finance API
+- Hugging Face Inference API
+
+### Frontend
+- Next.js
+- TypeScript
+- Tailwind CSS
+- D3.js for visualizations
+- Recharts for charts
 
 ## Prerequisites
 
 - Node.js (v16 or higher)
-- npm (v7 or higher)
-- Alpha Vantage API key (get one for free at https://www.alphavantage.co/)
+- npm or yarn
+- Hugging Face API key
 
-## Setup
+## Environment Variables
+
+### Backend (.env)
+```
+QWEN_API_KEY=your_huggingface_api_key_here
+```
+
+## Installation
 
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd stock-market-dashboard
+cd <repository-name>
 ```
 
-2. Install dependencies for both frontend and backend:
+2. Install backend dependencies:
 ```bash
-# Install frontend dependencies
-cd frontend
-npm install
-
-# Install backend dependencies
-cd ../backend
+cd backend
 npm install
 ```
 
-3. Create a `.env` file in the backend directory and add your Alpha Vantage API key:
-```
-ALPHA_VANTAGE_API_KEY=your_api_key_here
+3. Install frontend dependencies:
+```bash
+cd ../frontend
+npm install
 ```
 
-4. Start the development servers:
+## Running the Application
 
-In one terminal (backend):
+1. Start the backend server:
 ```bash
 cd backend
 npm run start:dev
 ```
 
-In another terminal (frontend):
+2. Start the frontend development server:
 ```bash
 cd frontend
 npm run dev
 ```
 
-5. Open your browser and navigate to `http://localhost:3000`
+The application will be available at:
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:3002
 
-## Usage
+## API Endpoints
 
-1. Enter a stock symbol (e.g., AAPL, GOOGL, MSFT) in the search bar
-2. Select a timeframe (Daily or Intraday)
-3. View the different visualizations:
-   - Price Chart: Shows the stock's price movement over time
-   - Volume Analysis: Displays trading volume data
-   - Price Distribution: Interactive swarm plot showing price distribution
+### Stock Market Data
+- `GET /stock-market/daily?symbol=<symbol>` - Get daily stock data
+- `GET /stock-market/intraday?symbol=<symbol>` - Get intraday stock data
+- `POST /stock-market/analyze` - Get AI analysis for a stock
 
-## Technologies Used
+## Features in Detail
 
-- Frontend:
-  - Next.js
-  - React
-  - Tailwind CSS
-  - Recharts
-  - D3.js
-  - TypeScript
+### Stock Visualization
+- Interactive swarm plot showing stock relationships
+- Price and volume charts
+- Real-time data updates
 
-- Backend:
-  - NestJS
-  - TypeScript
-  - Axios
-  - Alpha Vantage API
+### AI Analysis
+- Sentiment analysis
+- Technical analysis
+- Key points and risk factors
+- Market performance summary
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-MIT 
+This project is licensed under the MIT License - see the LICENSE file for details. 
