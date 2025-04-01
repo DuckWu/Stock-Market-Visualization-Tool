@@ -368,7 +368,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
           try {
             console.log(`Fetching real data for ${stock.symbol}...`);
             // Try to fetch from backend API with increased timeout
-            const response = await axios.get(`http://localhost:3002/stock-market/daily?symbol=${stock.symbol}`, {
+            const response = await axios.get(`http://3.148.170.36:3002/stock-market/daily?symbol=${stock.symbol}`, {
               timeout: 8000 // Increased timeout to 8 seconds for better chance of success
             });
             
