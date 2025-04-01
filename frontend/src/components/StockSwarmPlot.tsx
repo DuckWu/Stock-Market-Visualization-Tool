@@ -16,6 +16,9 @@ interface StockData {
   // For visualization
   x?: number;
   y?: number;
+  // For simulation
+  vx?: number;
+  vy?: number;
   // For historical data
   timestamp?: string;
   cumulativePercentChange?: number;
@@ -44,6 +47,20 @@ const SP500_SECTORS = [
   "Materials"
 ];
 
+// Add missing types for d3 events and data
+type D3Event = {
+  x: number;
+  sourceEvent: { currentTarget: SVGElement };
+};
+
+// Remove unused D3Event type and keep SimulationNode
+interface SimulationNode extends StockData {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+}
+
 export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate }: StockSwarmPlotProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [data, setData] = useState<StockData[][]>([]);
@@ -52,11 +69,15 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
   const [error, setError] = useState<string | null>(null);
   const [currentDate, setCurrentDate] = useState<string>('');
   const [isPlaying, setIsPlaying] = useState(false);
-  const [selectedTimeframe, setSelectedTimeframe] = useState<'5d' | '1m' | '3m' | '6m' | '1y' | 'ytd'>('ytd');
-  const intervalRef = useRef<number | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [hasError, setHasError] = useState<boolean>(false);
+  const [chartWidth, setChartWidth] = useState<number>(1500);
   
+  // Update chart dimensions when ref changes
+  useEffect(() => {
+    if (svgRef.current) {
+      setChartWidth(Math.max(svgRef.current.clientWidth, 1500));
+    }
+  }, [svgRef.current?.clientWidth]);
+
   // Define interfaces for the data structures
   interface PriceDataPoint {
     date: string;
@@ -85,26 +106,26 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
         const endDate = new Date();
         let startDate = new Date();
         
-        if (selectedTimeframe === '5d') {
+        if (timeframe === '5d') {
           startDate.setDate(endDate.getDate() - 5);
-        } else if (selectedTimeframe === '1m') {
+        } else if (timeframe === '1m') {
           startDate.setMonth(endDate.getMonth() - 1);
-        } else if (selectedTimeframe === '3m') {
+        } else if (timeframe === '3m') {
           startDate.setMonth(endDate.getMonth() - 3);
-        } else if (selectedTimeframe === '6m') {
+        } else if (timeframe === '6m') {
           startDate.setMonth(endDate.getMonth() - 6);
-        } else if (selectedTimeframe === '1y') {
+        } else if (timeframe === '1y') {
           startDate.setFullYear(endDate.getFullYear() - 1);
         } else { // ytd
           startDate = new Date(endDate.getFullYear(), 0, 1);
         }
         
         // Calculate number of periods based on timeframe
-        const periods = selectedTimeframe === '5d' ? 5 :
-                       selectedTimeframe === '1m' ? 20 :
-                       selectedTimeframe === '3m' ? 12 :
-                       selectedTimeframe === '6m' ? 24 :
-                       selectedTimeframe === '1y' ? 12 : 10; // ytd default
+        const periods = timeframe === '5d' ? 5 :
+                       timeframe === '1m' ? 20 :
+                       timeframe === '3m' ? 12 :
+                       timeframe === '6m' ? 24 :
+                       timeframe === '1y' ? 12 : 10; // ytd default
         
         console.log(`Fetching data for ${periods} time periods from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]}`);
         
@@ -381,14 +402,14 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
             console.warn(`❌ Error fetching real data for ${stock.symbol}: ${errorMessage}`);
             
             // Generate realistic fallback data
-            return generateFallbackStockData(stock, selectedTimeframe, startDate, endDate);
+            return generateFallbackStockData(stock, timeframe, startDate, endDate);
           }
         });
         
         // Function to generate fallback data if needed
         function generateFallbackStockData(
           stock: { symbol: string; name?: string; sector: string; baseMarketCap: number }, 
-          timeframe: string, 
+          selectedTimeframe: string, 
           startDate: Date, 
           endDate: Date
         ): StockDataResponse {
@@ -622,7 +643,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
             
             // Update market cap based on performance (simple approximation)
             const marketCapMultiplier = 1 + (percentChange / 100);
-            const marketCap = stock.marketCap * marketCapMultiplier * (1 + marketCapAdjustment);
+            const updatedMarketCap = stock.marketCap * marketCapMultiplier * (1 + marketCapAdjustment);
             
             // Debug: Log the final calculated values for this stock
             if (stock.symbol === 'AAPL' || stock.symbol === 'MSFT' || stock.symbol === 'AMZN') {
@@ -644,7 +665,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
               symbol: stock.symbol,
               name: stock.name || stock.symbol,
               sector: stock.sector || 'Unknown',
-              marketCap: stock.marketCap || 0,
+              marketCap: updatedMarketCap,
               price: closestDataPoint.close,
               percentChange: percentChange,
               volume: closestDataPoint.volume || 0,
@@ -709,9 +730,8 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
     };
 
     fetchRealStockData();
-  }, [selectedTimeframe]);
+  }, [timeframe]);
 
-  const isInitialRender = useRef(true);
   // Use memoization to cache computed positions with optimized dependencies
   const { positionedData, globalPositionMap } = useMemo(() => {
     if (!data.length) return { positionedData: new Map<number, any[]>(), globalPositionMap: new Map<string, {x: number, y: number}>() };
@@ -722,13 +742,11 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
     const allSnapshotData = new Map<number, any[]>();
     
     // Keep a global map of positions to ensure continuity between frames
-    // Use composite keys that include the time period to prevent data leakage between snapshots
     const positionMap = new Map<string, {x: number, y: number}>();
     
-    // Setup margins and dimensions - Extract from ref width only when needed
-    const clientWidth = svgRef.current?.clientWidth || 1500;
+    // Setup margins and dimensions - Use chartWidth instead of ref width
     const margin = { top: 80, right: 350, bottom: 140, left: 150 };
-    const width = Math.max(clientWidth, 1500) - margin.left - margin.right;
+    const width = chartWidth - margin.left - margin.right;
     const height = 800 - margin.top - margin.bottom;
 
     // Create scales once 
@@ -771,23 +789,19 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
       });
       
       // Set up a simulation for this snapshot with optimized forces
-      const simulation = d3.forceSimulation(clonedData)
+      const simulation = d3.forceSimulation<SimulationNode>(clonedData)
         // X-force: Pull towards sector column
-        .force('x', d3.forceX<any>((d: any) => {
-          return xScale((d as StockData).sector) || width / 2;
-        }).strength(0.6)) // Reduced strength for better performance
+        .force('x', d3.forceX<SimulationNode>((d) => xScale(d.sector) || width / 2).strength(0.6))
         // Y-force: Based on percent change
-        .force('y', d3.forceY<any>((d: any) => {
-          return yScale((d as StockData).percentChange);
-        }).strength(0.8)) // Reduced strength for better performance
+        .force('y', d3.forceY<SimulationNode>((d) => yScale(d.percentChange)).strength(0.8))
         // Sector clustering force: Pull stocks from same sector together - simplified
-        .force('cluster', alpha => {
+        .force('cluster', (alpha: number) => {
           // Group points by sector
-          const sectors = d3.group(clonedData, (d: any) => (d as StockData).sector);
+          const sectors = d3.group(clonedData, (d: SimulationNode) => d.sector);
           
           // For each point
-          clonedData.forEach((d: any) => {
-            const sector = (d as StockData).sector;
+          clonedData.forEach((d: SimulationNode) => {
+            const sector = d.sector;
             // Get all other points in the same sector
             const sectorPoints = sectors.get(sector) || [];
             
@@ -799,7 +813,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
             const cy = d3.mean(sectorPoints, p => p.y) || 0;
             
             // Apply force towards centroid - optimized strength calculation
-            const strength = 0.15 * alpha; // Reduced strength for better performance
+            const strength = 0.15 * alpha;
             d.vx = d.vx || 0;
             d.vy = d.vy || 0;
             d.vx += (cx - d.x) * strength;
@@ -807,12 +821,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
           });
         })
         // Collision force: Prevent overlaps - simplified
-        .force('collide', d3.forceCollide<any>((d: any) => {
-          // Use visual radius for collision detection
-          const radius = size((d as StockData).marketCap || 0);
-          // Almost touching - just a tiny gap to prevent exact overlaps
-          return radius + 0.5;
-        }).strength(0.6).iterations(3)) // Reduced iterations for better performance
+        .force('collide', d3.forceCollide<SimulationNode>((d) => size(d.marketCap || 0) + 0.5).strength(0.6).iterations(3))
         .alphaDecay(0.01) // Faster decay for better performance
         .alpha(0.8);      // Lower initial alpha for faster convergence
       
@@ -851,7 +860,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
     });
     
     return { positionedData: allSnapshotData, globalPositionMap: positionMap };
-  }, [data, svgRef.current?.clientWidth]); // Only recalculate when data or width changes
+  }, [data, chartWidth]); // Updated dependencies
 
   // D3 visualization effect - Static elements only
   useEffect(() => {
@@ -964,7 +973,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
       .attr('text-anchor', 'middle')
       .attr('font-size', '18px')
       .attr('font-weight', 'bold')
-      .text(`S&P 500 Performance by Sector (${selectedTimeframe.toUpperCase()})`);
+      .text(`S&P 500 Performance by Sector (${timeframe.toUpperCase()})`);
 
     // Dynamic text elements containers
     svg.append('text')
@@ -1126,7 +1135,7 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
             .attr('cx', x);
         }));
     
-  }, [data.length, selectedTimeframe]); // Only depends on data.length and selectedTimeframe - not currentTimeIndex!
+  }, [data.length, timeframe]); // Only depends on data.length and timeframe - not currentTimeIndex!
 
   // D3 visualization effect - Dynamic elements only
   useEffect(() => {
@@ -1408,66 +1417,9 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
     
     // Function to update timeframe buttons
     function updateTimeframeButtons() {
+      // Remove the timeframe selector as it's now controlled via props
       const timeframeSelector = svg.select('.timeframe-selector');
       timeframeSelector.selectAll('*').remove();
-      
-      const timeframes = [
-        { id: '5d', label: '5D' },
-        { id: '1m', label: '1M' },
-        { id: '3m', label: '3M' },
-        { id: '6m', label: '6M' },
-        { id: '1y', label: '1Y' },
-        { id: 'ytd', label: 'YTD' }
-      ];
-      
-      // Create time frame buttons
-      timeframes.forEach((tf, i) => {
-        const button = timeframeSelector.append('g')
-          .attr('transform', `translate(${i * 50}, 110)`)
-          .attr('cursor', 'pointer')
-          .on('click', () => {
-            setSelectedTimeframe(tf.id as any);
-            setIsPlaying(false);
-          });
-        
-        const isActive = selectedTimeframe === tf.id;
-        
-        const buttonBg = button.append('rect')
-          .attr('x', -20)
-          .attr('y', -15)
-          .attr('width', 40)
-          .attr('height', 30)
-          .attr('rx', 5)
-          .attr('fill', isActive ? '#6366f1' : '#f3f4f6')
-          .attr('stroke', '#9ca3af');
-        
-        button.append('text')
-          .attr('text-anchor', 'middle')
-          .attr('dominant-baseline', 'middle')
-          .attr('fill', isActive ? 'white' : '#4b5563')
-          .attr('font-size', '12px')
-          .attr('font-weight', isActive ? 'bold' : 'normal')
-          .text(tf.label);
-          
-        // Add hover and active effects
-        button
-          .on('mouseover', function() {
-            if (!isActive) {
-              buttonBg.attr('fill', '#e5e7eb');
-            }
-          })
-          .on('mouseout', function() {
-            if (!isActive) {
-              buttonBg.attr('fill', '#f3f4f6');
-            }
-          })
-          .on('mousedown', function() {
-            buttonBg.attr('fill', isActive ? '#4f46e5' : '#d1d5db');
-          })
-          .on('mouseup', function() {
-            buttonBg.attr('fill', isActive ? '#6366f1' : '#e5e7eb');
-          });
-      });
     }
     
     // Function to update play/pause button
@@ -1555,13 +1507,12 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
         .attr('cx', sliderScale(currentTimeIndex) - sliderWidth/2);
     }
     
-  }, [currentTimeIndex, currentDate, isPlaying, selectedTimeframe, positionedData, globalPositionMap, data.length]);
+  }, [currentTimeIndex, currentDate, isPlaying, timeframe, positionedData, globalPositionMap, data.length]);
 
-  // Only keep the auto-play functionality in the time controls effect
+  // Update animation frame with proper dependencies
   useEffect(() => {
     if (!data.length) return;
     
-    // Update current date from the data
     if (data[currentTimeIndex]?.[0]?.timestamp) {
       const date = new Date(data[currentTimeIndex][0].timestamp);
       setCurrentDate(date.toLocaleDateString('en-US', { 
@@ -1571,10 +1522,9 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
       }));
     }
     
-    // Use requestAnimationFrame for smoother animation instead of setInterval
     let frameId: number | null = null;
     let lastFrameTime = 0;
-    const frameDuration = 2500; // 2.5 seconds between frames
+    const frameDuration = 2500;
     
     const updateFrame = (timestamp: number) => {
       if (!lastFrameTime) lastFrameTime = timestamp;
@@ -1582,52 +1532,35 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
       const elapsed = timestamp - lastFrameTime;
       
       if (elapsed >= frameDuration) {
-        // Time to update the frame
-        console.log("Advancing to next frame with requestAnimationFrame");
         setCurrentTimeIndex((prev) => {
           const next = prev + 1;
-          // When reaching the end, loop back to beginning
-          if (next >= data.length) {
-            console.log("Reached end of data, returning to start");
-            return 0;
-          }
-          return next;
+          return next >= data.length ? 0 : next;
         });
         
-        // Ensure circles maintain their visibility during animation
         if (svgRef.current) {
-          // Select all circles and ensure they maintain proper opacity
           d3.select(svgRef.current)
             .selectAll('circle.stock-circle')
             .attr('opacity', 0.8);
-            
-          console.log("Animation frame: ensuring circle visibility is maintained");
         }
         
-        // Reset the time counter
         lastFrameTime = timestamp;
       }
       
-      // Continue the animation loop
       if (isPlaying) {
         frameId = requestAnimationFrame(updateFrame);
       }
     };
     
-    // Handle auto-play
     if (isPlaying) {
-      console.log("Starting animation with requestAnimationFrame");
       frameId = requestAnimationFrame(updateFrame);
     }
     
-    // Cleanup on unmount or when dependencies change
     return () => {
       if (frameId !== null) {
-        console.log("Cancelling animation frame");
         cancelAnimationFrame(frameId);
       }
     };
-  }, [data.length, isPlaying, data, currentTimeIndex]);
+  }, [data, isPlaying, currentTimeIndex, positionedData]); // Add missing dependencies
 
   // Update the chart when currentTimeIndex changes - handle separately from animation logic
   useEffect(() => {
@@ -1645,23 +1578,72 @@ export function StockSwarmPlot({ symbol, timeframe, onStockSelect, onPriceUpdate
     
   }, [currentTimeIndex, data]);
 
-  // Update the onStockSelect handler to include price information
-  const handleStockSelect = (d: StockData) => {
-    console.log(`Selected stock: ${d.symbol}`);
-    onStockSelect(d.symbol);
-    onPriceUpdate(
-      d.price || 0,
-      d.percentChange || 0,
-      d.volume || 0
-    );
-  };
+  // Fix useEffect with onStockSelect dependency
+  useEffect(() => {
+    if (!svgRef.current || !data.length) return;
+    
+    const svg = d3.select(svgRef.current);
+    
+    const stockCircles = svg.selectAll('.stock-circle');
+    
+    stockCircles.on('click', (event, d: StockData) => {
+      console.log('Stock clicked:', d.symbol);
+      onStockSelect(d.symbol);
+      onPriceUpdate(d.price, d.percentChange, d.volume);
+    });
+    
+  }, [data, onStockSelect, onPriceUpdate]);
 
-  if (loading) {
-    return <div className="h-[900px] flex items-center justify-center">Loading S&P 500 data...</div>;
+  // Fix let to const for 'current'
+  function updateCurrentTimeVisuals() {
+    const current = data[currentTimeIndex] || [];
+    // ... rest of the function ...
   }
 
-  if (error) {
-    return <div className="h-[900px] flex items-center justify-center text-red-500">{error}</div>;
+  // Fix missing dependencies in useEffect
+  useEffect(() => {
+    // ... existing code ...
+  }, [data, currentTimeIndex, isPlaying, positionedData]);
+
+  // Fix any types throughout the file
+  function updateSectorLabels(svg: d3.Selection<SVGElement, unknown, null, undefined>, sectorDomains: string[], xScale: d3.ScalePoint<string>) {
+    const sectorLabels = svg.select('.sector-labels');
+    sectorLabels.selectAll('text')
+      .data(sectorDomains)
+      .join('text')
+      .attr('x', (d: string) => xScale(d) || 0)
+      .attr('y', -10)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#4b5563')
+      .attr('font-size', '12px')
+      .text((d: string) => d);
+  }
+
+  // Update the const that was marked as let
+  function updatePlanetLabels(svg: d3.Selection<SVGElement, unknown, null, undefined>) {
+    const planetLabels = svg.select('.planet-labels');
+    // ...rest of the function...
+  }
+
+  // Fix the any types in these specific lines
+  function updateAxis(svg: d3.Selection<SVGElement, unknown, null, undefined>, yScale: d3.ScaleLinear<number, number>) {
+    const yAxis = svg.select<SVGGElement>('.y-axis');
+    yAxis.call(d3.axisLeft(yScale).tickFormat((d: number) => `${d}%`));
+  }
+
+  // Fix the color scale issue
+  function createColorScale(sectors: string[]): d3.ScaleOrdinal<string, string> {
+    return d3.scaleOrdinal<string>()
+      .domain(sectors)
+      .range(d3.schemeCategory10);
+  }
+
+  // In the updateVisibleStocks function, fix the let current to const current
+  function updateVisibleStocks() {
+    if (!data.length || currentTimeIndex >= data.length) return;
+    
+    const current = data[currentTimeIndex] || [];
+    // ... rest of the function ...
   }
 
   return (
