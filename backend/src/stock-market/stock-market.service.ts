@@ -156,7 +156,12 @@ IMPORTANT: You must respond with ONLY a valid JSON object, no other text. The JS
       }
       
       try {
-        const analysis = JSON.parse(content);
+        // Try to find JSON in the response
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          throw new Error('No JSON found in response');
+        }
+        const analysis = JSON.parse(jsonMatch[0]);
         return analysis;
       } catch (parseError) {
         this.logger.error(`Failed to parse JSON response: ${content}`);
