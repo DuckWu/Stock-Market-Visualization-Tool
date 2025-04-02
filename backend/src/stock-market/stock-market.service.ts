@@ -133,14 +133,28 @@ export class StockMarketService {
       
       // Ensure we have valid price data
       const currentPrice = (data.price && data.price > 0) ? data.price : (quote.regularMarketPrice || 0);
-      const priceChange = (data.change !== undefined && !isNaN(data.change)) ? data.change : 
-                         (quote.regularMarketChangePercent ? quote.regularMarketChangePercent * 100 : 0);
+      
+      // Log raw values for debugging
+      this.logger.debug(`Yahoo Finance data for ${data.symbol}:`, JSON.stringify({
+        regularMarketPrice: quote.regularMarketPrice,
+        regularMarketChangePercent: quote.regularMarketChangePercent,
+        regularMarketChange: quote.regularMarketChange,
+        regularMarketVolume: quote.regularMarketVolume
+      }));
+      
+      // Handle price change - make sure we have a valid percentage value
+      let priceChange = 0;
+      if (data.change !== undefined && !isNaN(data.change) && data.change !== 0) {
+        priceChange = data.change;
+      } else if (quote.regularMarketChangePercent !== undefined) {
+        // Yahoo Finance returns this as a decimal (e.g., 0.0234 for 2.34%)
+        priceChange = quote.regularMarketChangePercent;
+      }
+      
       const tradeVolume = (data.volume && data.volume > 0) ? data.volume : (quote.regularMarketVolume || 0);
       
-      // Log the incoming data and what we're using
-      this.logger.debug(`Analyzing ${data.symbol}: Received price=${data.price}, Using price=${currentPrice}`);
-      this.logger.debug(`Analyzing ${data.symbol}: Received change=${data.change}, Using change=${priceChange}`);
-      this.logger.debug(`Analyzing ${data.symbol}: Received volume=${data.volume}, Using volume=${tradeVolume}`);
+      // Log the final values we're using
+      this.logger.debug(`Final values for ${data.symbol} analysis: price=${currentPrice}, change=${priceChange}, volume=${tradeVolume}`);
       
       // Fetch some historical data for basic calculations
       const historicalData = await yahooFinance.historical(data.symbol, {
@@ -162,11 +176,15 @@ export class StockMarketService {
         volatility: volatility
       };
       
+      // Format the price change for display with proper sign and percentage
+      const changeSign = priceChange >= 0 ? '+' : '';
+      const changeFormatted = `${changeSign}${priceChange.toFixed(2)}%`;
+      
       // Create system and user messages for the chat API
       const systemMessage = "You are a helpful financial assistant.";
       const userMessage = `Summarize ${data.symbol} stock today:
 Price: $${currentPrice.toFixed(2)}
-Change: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%
+Change: ${changeFormatted}
 Volume: ${tradeVolume.toLocaleString()}
 P/E Ratio: ${quote.trailingPE?.toFixed(2) || 'N/A'}
 ${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day average of ${movingAvg.toFixed(2)}
