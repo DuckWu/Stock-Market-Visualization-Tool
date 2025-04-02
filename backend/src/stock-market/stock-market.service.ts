@@ -2,8 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import yahooFinance from 'yahoo-finance2';
 import { promisify } from 'util';
-import { exec, ChildProcess } from 'child_process';
+import { exec } from 'child_process';
 import * as path from 'path';
+import axios from 'axios';
 
 const execAsync = promisify(exec);
 
@@ -29,6 +30,7 @@ export class StockMarketService {
   private readonly modelPath: string;
   private readonly llamaCliPath: string;
   private readonly modelTimeout: number;
+  private readonly chatApiUrl: string;
 
   constructor(
     private readonly configService: ConfigService,
@@ -37,10 +39,10 @@ export class StockMarketService {
     this.modelPath = this.configService.get<string>('TINYLLAMA_MODEL_PATH', '/home/ec2-user/llama.cpp/build/bin/tinyllama.gguf');
     this.llamaCliPath = this.configService.get<string>('LLAMA_CLI_PATH', '/home/ec2-user/llama.cpp/build/bin/llama-cli');
     this.modelTimeout = parseInt(this.configService.get<string>('LLM_TIMEOUT_SECONDS', '120')) * 1000;
+    this.chatApiUrl = this.configService.get<string>('CHAT_API_URL', 'http://3.148.170.36:8080/v1/chat/completions');
     
     // Log configuration on startup
-    this.logger.log(`Using TinyLlama model at: ${this.modelPath}`);
-    this.logger.log(`Using llama-cli at: ${this.llamaCliPath}`);
+    this.logger.log(`Using chat API at: ${this.chatApiUrl}`);
     this.logger.log(`LLM timeout set to: ${this.modelTimeout / 1000} seconds`);
   }
 
@@ -150,10 +152,9 @@ export class StockMarketService {
         volatility: volatility
       };
       
-      // Create a prompt optimized for llama-cli
-      const prompt = `You are a financial assistant who writes concise and insightful stock analyses.
-
-Analyze stock ${data.symbol}:
+      // Create system and user messages for the chat API
+      const systemMessage = "You are a helpful financial assistant.";
+      const userMessage = `Summarize ${data.symbol} stock today:
 Price: $${data.price.toFixed(2)}
 Change: ${data.change > 0 ? '+' : ''}${data.change.toFixed(2)}%
 Volume: ${data.volume.toLocaleString()}
@@ -161,149 +162,205 @@ P/E Ratio: ${quote.trailingPE?.toFixed(2) || 'N/A'}
 ${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day average of ${movingAvg.toFixed(2)}
 Volatility: ${(volatility * 100).toFixed(1)}%
 
-Give a short sentiment, summary, key points, technical analysis and risk factors.`;
+Give a short sentiment (positive/negative/neutral), summary, key points, technical analysis and risk factors.`;
 
       try {
-        // Ensure the command is properly escaped with double backslashes for percent signs in Windows
-        const escapedPrompt = JSON.stringify(prompt).replace(/%/g, '%%');
+        this.logger.debug(`Calling chat API for symbol ${data.symbol}`);
         
-        // Prepare the command with absolute paths (no --system parameter)
-        const command = `${this.llamaCliPath} --model ${this.modelPath} --prompt ${escapedPrompt} --no-warmup --threads 1 --ctx-size 512`;
+        // Create request payload for the chat API
+        const payload = {
+          messages: [
+            { role: "system", content: systemMessage },
+            { role: "user", content: userMessage }
+          ],
+          max_tokens: 500
+        };
         
-        this.logger.debug(`Executing command: ${command}`);
+        // Set timeout for the API call
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.modelTimeout);
         
-        // Create a promise that will reject after timeout
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('LLM processing timeout')), this.modelTimeout);
-        });
+        // Call the chat API
+        const response = await axios.post(
+          this.chatApiUrl,
+          payload,
+          { 
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            timeout: this.modelTimeout
+          }
+        );
         
-        // Create a promise for the execution
-        const executionPromise = execAsync(command);
+        // Clear the timeout
+        clearTimeout(timeoutId);
         
-        // Race the execution against the timeout
-        const { stdout } = await Promise.race([executionPromise, timeoutPromise])
-          .catch(error => {
-            if (error.message === 'LLM processing timeout') {
-              this.logger.warn(`TinyLlama timeout after ${this.modelTimeout / 1000} seconds for symbol ${data.symbol}`);
-              return { stdout: '', stderr: 'Timeout exceeded' };
+        // Process API response
+        if (response.data && response.data.choices && response.data.choices.length > 0) {
+          const content = response.data.choices[0].message.content;
+          
+          this.logger.debug(`Received API response for ${data.symbol}, length: ${content.length} chars`);
+          
+          // Extract first 1-2 sentences for summary (up to 150 chars)
+          const sentenceEndRegex = /[.!?]\s+/g;
+          const sentences = content.split(sentenceEndRegex);
+          let summary = sentences[0] || '';
+          if (sentences.length > 1 && summary.length < 100) {
+            summary += '. ' + sentences[1];
+          }
+          summary = summary.substring(0, 150);
+          
+          // Try to determine sentiment from keywords
+          let sentiment = 'neutral';
+          const lowerText = content.toLowerCase();
+          
+          const positiveTerms = ['positive', 'bullish', 'uptrend', 'growth', 'increase', 'buy', 'strong', 'opportunity'];
+          const negativeTerms = ['negative', 'bearish', 'downtrend', 'decline', 'decrease', 'sell', 'weak', 'risk', 'caution'];
+          
+          let positiveCount = 0;
+          let negativeCount = 0;
+          
+          positiveTerms.forEach(term => {
+            const matches = lowerText.match(new RegExp(term, 'g'));
+            if (matches) positiveCount += matches.length;
+          });
+          
+          negativeTerms.forEach(term => {
+            const matches = lowerText.match(new RegExp(term, 'g'));
+            if (matches) negativeCount += matches.length;
+          });
+          
+          if (positiveCount > negativeCount + 1) {
+            sentiment = 'positive';
+          } else if (negativeCount > positiveCount + 1) {
+            sentiment = 'negative';
+          }
+          
+          // Extract some bullet points from the text
+          const keyPoints: string[] = [];
+          const paragraphs = content.split('\n').filter(p => p.trim().length > 20);
+          
+          // Find sections labeled as key points
+          const keyPointSection = content.toLowerCase().indexOf('key point');
+          if (keyPointSection !== -1) {
+            const keyPointsText = content.substring(keyPointSection);
+            const keyPointLines = keyPointsText.split('\n')
+              .filter(line => line.trim().length > 0 && (line.includes('-') || line.includes('•') || /^\d+\./.test(line)))
+              .slice(0, 3);
+            
+            if (keyPointLines.length > 0) {
+              keyPointLines.forEach(line => {
+                const point = line.replace(/^[•\-\d\.]+\s*/, '').trim();
+                if (point.length > 0) {
+                  keyPoints.push(point);
+                }
+              });
             }
-            throw error;
-          }) as { stdout: string, stderr: string };
+          }
+          
+          // If we couldn't find specific key points, extract some sentences
+          if (keyPoints.length === 0) {
+            // Take up to 3 paragraphs and use them as key points
+            for (let i = 0; i < Math.min(3, paragraphs.length); i++) {
+              const paragraph = paragraphs[i].trim();
+              if (paragraph && paragraph !== summary) {
+                // Truncate long paragraphs
+                keyPoints.push(paragraph.length > 100 ? paragraph.substring(0, 100) + '...' : paragraph);
+              }
+            }
+          }
+          
+          // If we still couldn't extract key points, create some generic ones
+          if (keyPoints.length === 0) {
+            keyPoints.push('See full analysis in the raw response below');
+          }
+          
+          // Look for technical analysis section
+          let technicalAnalysis = 'Full technical analysis available in the raw AI response below.';
+          const techIndex = content.toLowerCase().indexOf('technical analysis');
+          if (techIndex !== -1) {
+            const nextSectionIndex = content.toLowerCase().substring(techIndex + 20).search(/\n\s*([a-z]+\s+[a-z]+:|\d+\.)/i);
+            if (nextSectionIndex !== -1) {
+              technicalAnalysis = content.substring(techIndex, techIndex + 20 + nextSectionIndex).trim();
+            } else {
+              // Take a reasonable chunk
+              technicalAnalysis = content.substring(techIndex, Math.min(techIndex + 200, content.length)).trim();
+            }
+          }
+          
+          // Look for risk factors
+          const riskFactors: string[] = [];
+          const riskIndex = content.toLowerCase().indexOf('risk');
+          if (riskIndex !== -1) {
+            const riskText = content.substring(riskIndex);
+            const riskLines = riskText.split('\n')
+              .filter(line => line.trim().length > 0 && (line.includes('-') || line.includes('•') || /^\d+\./.test(line)))
+              .slice(0, 3);
+            
+            if (riskLines.length > 0) {
+              riskLines.forEach(line => {
+                const risk = line.replace(/^[•\-\d\.]+\s*/, '').trim();
+                if (risk.length > 0) {
+                  riskFactors.push(risk);
+                }
+              });
+            }
+          }
+          
+          if (riskFactors.length === 0) {
+            riskFactors.push('For complete risk assessment, please refer to the raw AI response.');
+          }
+          
+          // Return the analysis with the raw response
+          return {
+            sentiment,
+            summary,
+            keyPoints,
+            technicalAnalysis,
+            riskFactors,
+            llmStatus: 'online',
+            metrics,
+            rawLlmResponse: content
+          };
+        } else {
+          throw new Error('Invalid response format from chat API');
+        }
+      } catch (error) {
+        this.logger.error(`Error calling chat API: ${error.message}`);
         
-        // If we got an empty response due to timeout
-        if (!stdout) {
+        // Check if this is a timeout error
+        if (error.name === 'AbortError' || error.code === 'ECONNABORTED') {
+          this.logger.warn(`Chat API request timed out after ${this.modelTimeout / 1000} seconds for symbol ${data.symbol}`);
           return {
             sentiment: 'neutral',
-            summary: 'AI model still processing',
-            keyPoints: ['The TinyLlama model is taking longer than expected to generate analysis'],
-            technicalAnalysis: 'Analysis is still being generated. The model is running but hasn\'t completed yet.',
-            riskFactors: ['Analysis is incomplete due to processing time limits'],
+            summary: 'AI model processing timed out',
+            keyPoints: ['The analysis request took too long to respond'],
+            technicalAnalysis: 'Analysis could not be completed within the time limit.',
+            riskFactors: ['Analysis unavailable due to timeout'],
             llmStatus: 'processing',
             metrics,
             rawLlmResponse: ''
           };
         }
-
-        // Clean the response by removing the prompt
-        const cleanedResponse = stdout
-          .replace(prompt, '')  // Remove the input prompt
-          .trim();
         
-        this.logger.debug(`Raw LLM response (first 100 chars): ${cleanedResponse.substring(0, 100)}...`);
-        
-        // Extract first 1-2 sentences for summary (up to 150 chars)
-        const sentenceEndRegex = /[.!?]\s+/g;
-        const sentences = cleanedResponse.split(sentenceEndRegex);
-        let summary = sentences[0] || '';
-        if (sentences.length > 1 && summary.length < 100) {
-          summary += '. ' + sentences[1];
-        }
-        summary = summary.substring(0, 150);
-        
-        // Try to determine sentiment from keywords
-        let sentiment = 'neutral';
-        const lowerText = cleanedResponse.toLowerCase();
-        
-        const positiveTerms = ['positive', 'bullish', 'uptrend', 'growth', 'increase', 'buy', 'strong', 'opportunity'];
-        const negativeTerms = ['negative', 'bearish', 'downtrend', 'decline', 'decrease', 'sell', 'weak', 'risk', 'caution'];
-        
-        let positiveCount = 0;
-        let negativeCount = 0;
-        
-        positiveTerms.forEach(term => {
-          const matches = lowerText.match(new RegExp(term, 'g'));
-          if (matches) positiveCount += matches.length;
-        });
-        
-        negativeTerms.forEach(term => {
-          const matches = lowerText.match(new RegExp(term, 'g'));
-          if (matches) negativeCount += matches.length;
-        });
-        
-        if (positiveCount > negativeCount + 1) {
-          sentiment = 'positive';
-        } else if (negativeCount > positiveCount + 1) {
-          sentiment = 'negative';
-        }
-        
-        // Extract some bullet points from the text
-        const keyPoints: string[] = [];
-        const paragraphs = cleanedResponse.split('\n').filter(p => p.trim().length > 20);
-        
-        // Take up to 3 paragraphs and use them as key points
-        for (let i = 0; i < Math.min(3, paragraphs.length); i++) {
-          const paragraph = paragraphs[i].trim();
-          if (paragraph && paragraph !== summary) {
-            // Truncate long paragraphs
-            keyPoints.push(paragraph.length > 100 ? paragraph.substring(0, 100) + '...' : paragraph);
-          }
-        }
-        
-        // If we couldn't extract key points, create some generic ones
-        if (keyPoints.length === 0) {
-          keyPoints.push('See full analysis in the raw response below');
-        }
-        
-        // Return the analysis with the raw response
-        return {
-          sentiment,
-          summary,
-          keyPoints,
-          technicalAnalysis: 'Full technical analysis available in the raw AI response below.',
-          riskFactors: ['For complete risk assessment, please refer to the raw AI response.'],
-          llmStatus: 'text_only',
-          metrics,
-          rawLlmResponse: cleanedResponse.substring(0, 2000) // Increased character limit
-        };
-        
-      } catch (modelError) {
-        this.logger.error(`TinyLlama model error or parsing issue: ${modelError.message}`);
-
-        // If we have output but couldn't parse it as JSON, return it as raw text
-        let rawResponse = '';
-        if (modelError.stdout) {
-          rawResponse = modelError.stdout
-            .replace(prompt, '')
-            .trim()
-            .substring(0, 1500);
-        }
-        
-        // Return a response that includes the raw text from LLM
+        // Return error details
         return {
           sentiment: 'neutral',
-          summary: 'Could not parse structured analysis',
-          keyPoints: ['The model response could not be parsed as JSON'],
-          technicalAnalysis: 'The raw LLM response is shown below',
-          riskFactors: ['Analysis format error'],
-          llmStatus: 'text_only',
+          summary: 'Error running AI analysis',
+          keyPoints: [
+            'The stock analysis service encountered an error',
+            `Error details: ${error.message.substring(0, 100)}`
+          ],
+          technicalAnalysis: 'Unable to generate analysis due to a technical error.',
+          riskFactors: ['Analysis service is currently experiencing issues'],
+          llmStatus: 'error',
           metrics,
-          rawLlmResponse: rawResponse || 'No response text available'
+          rawLlmResponse: JSON.stringify(error.response?.data || error.message || 'Unknown error')
         };
       }
     } catch (error) {
       this.logger.error(`Error analyzing stock ${data.symbol}: ${error.message}`);
       
-      // Return a clear message that LLM service is having issues
+      // Return a clear message that service is having issues
       return {
         sentiment: 'neutral',
         summary: 'AI analysis service error',
@@ -311,7 +368,7 @@ Give a short sentiment, summary, key points, technical analysis and risk factors
           'The stock analysis service encountered an error',
           `Error details: ${error.message.substring(0, 100)}`
         ],
-        technicalAnalysis: 'Unable to generate analysis due to a service error. Our AI model could not process this request.',
+        technicalAnalysis: 'Unable to generate analysis due to a service error.',
         riskFactors: ['Analysis service is currently experiencing issues'],
         llmStatus: 'error',
         metrics: {
