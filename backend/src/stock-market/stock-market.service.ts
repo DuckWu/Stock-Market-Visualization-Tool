@@ -131,6 +131,17 @@ export class StockMarketService {
       // Fetch additional stock data for analysis
       const quote = await yahooFinance.quote(data.symbol);
       
+      // Ensure we have valid price data
+      const currentPrice = (data.price && data.price > 0) ? data.price : (quote.regularMarketPrice || 0);
+      const priceChange = (data.change !== undefined && !isNaN(data.change)) ? data.change : 
+                         (quote.regularMarketChangePercent ? quote.regularMarketChangePercent * 100 : 0);
+      const tradeVolume = (data.volume && data.volume > 0) ? data.volume : (quote.regularMarketVolume || 0);
+      
+      // Log the incoming data and what we're using
+      this.logger.debug(`Analyzing ${data.symbol}: Received price=${data.price}, Using price=${currentPrice}`);
+      this.logger.debug(`Analyzing ${data.symbol}: Received change=${data.change}, Using change=${priceChange}`);
+      this.logger.debug(`Analyzing ${data.symbol}: Received volume=${data.volume}, Using volume=${tradeVolume}`);
+      
       // Fetch some historical data for basic calculations
       const historicalData = await yahooFinance.historical(data.symbol, {
         period1: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
@@ -141,7 +152,6 @@ export class StockMarketService {
       const prices = historicalData.map(d => d.close);
       const volatility = this.calculateVolatility(prices);
       const movingAvg = this.calculateSMA(prices, 10);
-      const currentPrice = data.price;
       const movingAvgComparison = currentPrice > movingAvg ? "above" : "below";
       
       // Calculate these metrics regardless of LLM response
@@ -155,9 +165,9 @@ export class StockMarketService {
       // Create system and user messages for the chat API
       const systemMessage = "You are a helpful financial assistant.";
       const userMessage = `Summarize ${data.symbol} stock today:
-Price: $${data.price.toFixed(2)}
-Change: ${data.change > 0 ? '+' : ''}${data.change.toFixed(2)}%
-Volume: ${data.volume.toLocaleString()}
+Price: $${currentPrice.toFixed(2)}
+Change: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%
+Volume: ${tradeVolume.toLocaleString()}
 P/E Ratio: ${quote.trailingPE?.toFixed(2) || 'N/A'}
 ${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day average of ${movingAvg.toFixed(2)}
 Volatility: ${(volatility * 100).toFixed(1)}%
