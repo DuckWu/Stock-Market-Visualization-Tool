@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import yahooFinance from 'yahoo-finance2';
 import { promisify } from 'util';
-import { exec } from 'child_process';
+import { exec, ChildProcess } from 'child_process';
 import * as path from 'path';
 
 const execAsync = promisify(exec);
@@ -19,6 +19,8 @@ export interface StockAnalysisData {
     movingAverageComparison?: string;
     volatility?: number;
   };
+  llmStatus?: 'online' | 'offline' | 'processing' | 'error' | 'text_only';
+  rawLlmResponse: string;
 }
 
 @Injectable()
@@ -26,6 +28,7 @@ export class StockMarketService {
   private readonly logger = new Logger(StockMarketService.name);
   private readonly modelPath: string;
   private readonly llamaCliPath: string;
+  private readonly modelTimeout: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -33,10 +36,12 @@ export class StockMarketService {
     // Get paths from config or use defaults
     this.modelPath = this.configService.get<string>('TINYLLAMA_MODEL_PATH', './models/tinyllama.gguf');
     this.llamaCliPath = this.configService.get<string>('LLAMA_CLI_PATH', './build/bin/llama-cli');
+    this.modelTimeout = parseInt(this.configService.get<string>('LLM_TIMEOUT_SECONDS', '120')) * 1000;
     
     // Log configuration on startup
     this.logger.log(`Using TinyLlama model at: ${this.modelPath}`);
     this.logger.log(`Using llama-cli at: ${this.llamaCliPath}`);
+    this.logger.log(`LLM timeout set to: ${this.modelTimeout / 1000} seconds`);
   }
 
   async getDailyStockData(symbol: string) {
@@ -137,99 +142,146 @@ export class StockMarketService {
       const currentPrice = data.price;
       const movingAvgComparison = currentPrice > movingAvg ? "above" : "below";
       
-      // Create a simpler prompt for TinyLlama
-      const prompt = `Analyze stock ${data.symbol}:
-Price: $${data.price.toFixed(2)}
-Change: ${data.change.toFixed(2)}%
-Volume: ${data.volume.toLocaleString()}
-P/E: ${quote.trailingPE?.toFixed(2) || 'N/A'}
-${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day average of ${movingAvg.toFixed(2)}
-Volatility: ${(volatility * 100).toFixed(1)}%
-
-Respond with JSON: {sentiment, summary, keyPoints:[], technicalAnalysis, riskFactors:[]}`;
+      // Calculate these metrics regardless of LLM response
+      const metrics = {
+        priceToEarningsRatio: quote.trailingPE,
+        priceToBookRatio: quote.priceToBook,
+        movingAverageComparison: `${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day MA (${movingAvg.toFixed(2)})`,
+        volatility: volatility
+      };
+      
+      // Create a prompt optimized for llama-cli
+      const systemMessage = "You are an expert financial analyst with 15+ years of Wall Street experience. Your analysis is always balanced, insightful and professional. Focus on key trends and important metrics that would help investors make informed decisions. Provide concise analysis in clear language without jargon.";
+      
+      const prompt = `Analyze ${data.symbol} (Price: $${data.price.toFixed(2)}, Change: ${data.change > 0 ? '+' : ''}${data.change.toFixed(2)}%, Volume: ${data.volume.toLocaleString()}, P/E: ${quote.trailingPE?.toFixed(2) || 'N/A'}, ${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day MA of ${movingAvg.toFixed(2)}, Volatility: ${(volatility * 100).toFixed(1)}%). What is your professional assessment? /`;
 
       try {
         // Ensure the command is properly escaped
         const escapedPrompt = JSON.stringify(prompt);
+        const escapedSystemMessage = JSON.stringify(systemMessage);
         
-        // Prepare the command with absolute paths
-        const command = `${this.llamaCliPath} --model ${this.modelPath} --prompt ${escapedPrompt} --no-warmup --threads 1 --ctx-size 512`;
+        // Prepare the command with absolute paths, adding system message as parameter
+        const command = `${this.llamaCliPath} --model ${this.modelPath} --prompt ${escapedPrompt} --system ${escapedSystemMessage} --no-warmup --threads 1 --ctx-size 512`;
         
         this.logger.debug(`Executing command: ${command}`);
-        const { stdout } = await execAsync(command);
+        
+        // Create a promise that will reject after timeout
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('LLM processing timeout')), this.modelTimeout);
+        });
+        
+        // Create a promise for the execution
+        const executionPromise = execAsync(command);
+        
+        // Race the execution against the timeout
+        const { stdout } = await Promise.race([executionPromise, timeoutPromise])
+          .catch(error => {
+            if (error.message === 'LLM processing timeout') {
+              this.logger.warn(`TinyLlama timeout after ${this.modelTimeout / 1000} seconds for symbol ${data.symbol}`);
+              return { stdout: '', stderr: 'Timeout exceeded' };
+            }
+            throw error;
+          }) as { stdout: string, stderr: string };
+        
+        // If we got an empty response due to timeout
+        if (!stdout) {
+          return {
+            sentiment: 'neutral',
+            summary: 'AI model still processing',
+            keyPoints: ['The TinyLlama model is taking longer than expected to generate analysis'],
+            technicalAnalysis: 'Analysis is still being generated. The model is running but hasn\'t completed yet.',
+            riskFactors: ['Analysis is incomplete due to processing time limits'],
+            llmStatus: 'processing',
+            metrics,
+            rawLlmResponse: ''
+          };
+        }
 
-        // Try to extract JSON from the response
+        // Try to extract JSON from the response first
         const jsonMatch = stdout.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          throw new Error('No JSON found in TinyLlama response');
+        let analysis: Partial<StockAnalysisData>;
+        
+        if (jsonMatch) {
+          try {
+            // If we found JSON, try to parse it
+            const parsedJson = JSON.parse(jsonMatch[0]);
+            analysis = {
+              sentiment: parsedJson.sentiment || 'neutral',
+              summary: parsedJson.summary || 'No summary provided',
+              keyPoints: Array.isArray(parsedJson.keyPoints) ? parsedJson.keyPoints : ['No key points provided'],
+              technicalAnalysis: parsedJson.technicalAnalysis || 'No technical analysis provided',
+              riskFactors: Array.isArray(parsedJson.riskFactors) ? parsedJson.riskFactors : ['No risk factors provided'],
+            };
+          } catch (jsonError) {
+            // JSON parsing failed, fall back to text analysis
+            this.logger.warn(`Failed to parse JSON from LLM response: ${jsonError.message}`);
+            throw new Error('JSON parsing failed');
+          }
+        } else {
+          // No JSON found, use the text response as-is
+          throw new Error('No JSON found in response');
         }
         
-        let analysis = JSON.parse(jsonMatch[0]);
+        // Clean up the raw response for safe display
+        const cleanedResponse = stdout
+          .replace(prompt, '')  // Remove the prompt
+          .trim()
+          .substring(0, 1500);  // Limit length to avoid overwhelming the UI
         
-        // Ensure all expected fields exist
-        analysis = {
-          sentiment: analysis.sentiment || 'neutral',
-          summary: analysis.summary || 'No summary provided',
-          keyPoints: Array.isArray(analysis.keyPoints) ? analysis.keyPoints : ['No key points provided'],
-          technicalAnalysis: analysis.technicalAnalysis || 'No technical analysis provided',
-          riskFactors: Array.isArray(analysis.riskFactors) ? analysis.riskFactors : ['No risk factors provided'],
-          // Add our locally calculated metrics
-          metrics: {
-            priceToEarningsRatio: quote.trailingPE,
-            priceToBookRatio: quote.priceToBook,
-            movingAverageComparison: `${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day MA (${movingAvg.toFixed(2)})`,
-            volatility: volatility
-          }
-        };
+        // Return the complete analysis
+        return {
+          ...analysis,
+          metrics,
+          llmStatus: 'online',
+          rawLlmResponse: cleanedResponse
+        } as StockAnalysisData;
         
-        return analysis;
       } catch (modelError) {
-        this.logger.error(`TinyLlama model error: ${modelError.message}`);
-        // Don't throw here - fall back to our own analysis below
-        throw new Error('Failed to get analysis from local model');
+        this.logger.error(`TinyLlama model error or parsing issue: ${modelError.message}`);
+
+        // If we have output but couldn't parse it as JSON, return it as raw text
+        let rawResponse = '';
+        if (modelError.stdout) {
+          rawResponse = modelError.stdout
+            .replace(prompt, '')
+            .trim()
+            .substring(0, 1500);
+        }
+        
+        // Return a response that includes the raw text from LLM
+        return {
+          sentiment: 'neutral',
+          summary: 'Could not parse structured analysis',
+          keyPoints: ['The model response could not be parsed as JSON'],
+          technicalAnalysis: 'The raw LLM response is shown below',
+          riskFactors: ['Analysis format error'],
+          llmStatus: 'text_only',
+          metrics,
+          rawLlmResponse: rawResponse || 'No response text available'
+        };
       }
     } catch (error) {
       this.logger.error(`Error analyzing stock ${data.symbol}: ${error.message}`);
       
-      // Return a basic analysis using whatever data we have
-      try {
-        const quote = await yahooFinance.quote(data.symbol).catch(() => null);
-        
-        // Generate sentiment based on price change
-        let sentiment = 'neutral';
-        if (data.change > 1) sentiment = 'positive';
-        if (data.change < -1) sentiment = 'negative';
-        
-        return {
-          sentiment,
-          summary: `${data.symbol} is currently trading at $${data.price.toFixed(2)} with ${data.change > 0 ? 'a gain' : 'a loss'} of ${Math.abs(data.change).toFixed(2)}%.`,
-          keyPoints: [
-            `Current trading volume is ${data.volume.toLocaleString()}`,
-            quote?.marketCap ? `Market cap is $${(quote.marketCap / 1e9).toFixed(2)} billion` : 'Market cap data unavailable'
-          ],
-          technicalAnalysis: `Basic analysis based on recent price movement of ${data.change.toFixed(2)}%.`,
-          riskFactors: [
-            'Market volatility may affect stock performance',
-            'Past performance does not guarantee future results'
-          ],
-          metrics: {
-            priceToEarningsRatio: quote?.trailingPE,
-            priceToBookRatio: quote?.priceToBook,
-            movingAverageComparison: undefined,
-            volatility: undefined
-          }
-        };
-      } catch (fallbackError) {
-        // Absolute last resort
-        return {
-          sentiment: 'neutral',
-          summary: 'Analysis currently unavailable',
-          keyPoints: ['Service temporarily unavailable'],
-          technicalAnalysis: 'Technical analysis unavailable',
-          riskFactors: ['Analysis currently unavailable'],
-          metrics: {}
-        };
-      }
+      // Return a clear message that LLM service is having issues
+      return {
+        sentiment: 'neutral',
+        summary: 'AI analysis service error',
+        keyPoints: [
+          'The stock analysis service encountered an error',
+          `Error details: ${error.message.substring(0, 100)}`
+        ],
+        technicalAnalysis: 'Unable to generate analysis due to a service error. Our AI model could not process this request.',
+        riskFactors: ['Analysis service is currently experiencing issues'],
+        llmStatus: 'error',
+        metrics: {
+          priceToEarningsRatio: undefined,
+          priceToBookRatio: undefined,
+          movingAverageComparison: undefined,
+          volatility: undefined
+        },
+        rawLlmResponse: ''
+      };
     }
   }
 
