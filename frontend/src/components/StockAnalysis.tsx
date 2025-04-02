@@ -46,10 +46,7 @@ export function StockAnalysis({ symbol, price, change, volume }: StockAnalysisPr
           change,
           volume
         }, {
-          timeout: 200000, // Extended timeout for TinyLlama processing
-          headers: {
-            'Origin': 'http://3.148.170.36:3000'
-          }
+          timeout: 200000 // Extended timeout for TinyLlama processing
         });
         
         setAnalysis(response.data);
