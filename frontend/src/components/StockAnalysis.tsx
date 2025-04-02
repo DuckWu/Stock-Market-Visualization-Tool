@@ -48,7 +48,7 @@ export function StockAnalysis({ symbol, price, change, volume }: StockAnalysisPr
         }, {
           timeout: 200000, // Extended timeout for TinyLlama processing
           headers: {
-            'Origin': ['http://localhost:3000', 'http://3.148.170.36:3000']
+            'Origin': 'http://3.148.170.36:3000'
           }
         });
         
@@ -174,11 +174,11 @@ export function StockAnalysis({ symbol, price, change, volume }: StockAnalysisPr
       </div>
 
       {/* Display raw LLM response if available */}
-      {analysis.rawLlmResponse && analysis.llmStatus === 'text_only' && (
+      {analysis.rawLlmResponse && (
         <div className="space-y-2 mt-4 border-t pt-4">
           <h4 className="font-medium text-gray-900">Raw AI Response</h4>
           <div className="bg-gray-50 p-3 rounded-md text-sm font-mono whitespace-pre-wrap overflow-auto max-h-60">
-            {analysis.rawLlmResponse}
+            {analysis.rawLlmResponse || "No response text available"}
           </div>
         </div>
       )}

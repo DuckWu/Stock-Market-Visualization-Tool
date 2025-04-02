@@ -34,8 +34,8 @@ export class StockMarketService {
     private readonly configService: ConfigService,
   ) {
     // Get paths from config or use defaults
-    this.modelPath = this.configService.get<string>('TINYLLAMA_MODEL_PATH', './models/tinyllama.gguf');
-    this.llamaCliPath = this.configService.get<string>('LLAMA_CLI_PATH', './build/bin/llama-cli');
+    this.modelPath = this.configService.get<string>('TINYLLAMA_MODEL_PATH', '/home/ec2-user/llama.cpp/build/bin/tinyllama.gguf');
+    this.llamaCliPath = this.configService.get<string>('LLAMA_CLI_PATH', '/home/ec2-user/llama.cpp/build/bin/llama-cli');
     this.modelTimeout = parseInt(this.configService.get<string>('LLM_TIMEOUT_SECONDS', '120')) * 1000;
     
     // Log configuration on startup
@@ -151,17 +151,24 @@ export class StockMarketService {
       };
       
       // Create a prompt optimized for llama-cli
-      const systemMessage = "You are an expert financial analyst with 15+ years of Wall Street experience. Your analysis is always balanced, insightful and professional. Focus on key trends and important metrics that would help investors make informed decisions. Provide concise analysis in clear language without jargon.";
-      
-      const prompt = `Analyze ${data.symbol} (Price: $${data.price.toFixed(2)}, Change: ${data.change > 0 ? '+' : ''}${data.change.toFixed(2)}%, Volume: ${data.volume.toLocaleString()}, P/E: ${quote.trailingPE?.toFixed(2) || 'N/A'}, ${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day MA of ${movingAvg.toFixed(2)}, Volatility: ${(volatility * 100).toFixed(1)}%). What is your professional assessment? /`;
+      const prompt = `You are a financial assistant who writes concise and insightful stock analyses.
+
+Analyze stock ${data.symbol}:
+Price: $${data.price.toFixed(2)}
+Change: ${data.change > 0 ? '+' : ''}${data.change.toFixed(2)}%
+Volume: ${data.volume.toLocaleString()}
+P/E Ratio: ${quote.trailingPE?.toFixed(2) || 'N/A'}
+${currentPrice.toFixed(2)} is ${movingAvgComparison} 10-day average of ${movingAvg.toFixed(2)}
+Volatility: ${(volatility * 100).toFixed(1)}%
+
+Give a short sentiment, summary, key points, technical analysis and risk factors.`;
 
       try {
-        // Ensure the command is properly escaped
-        const escapedPrompt = JSON.stringify(prompt);
-        const escapedSystemMessage = JSON.stringify(systemMessage);
+        // Ensure the command is properly escaped with double backslashes for percent signs in Windows
+        const escapedPrompt = JSON.stringify(prompt).replace(/%/g, '%%');
         
-        // Prepare the command with absolute paths, adding system message as parameter
-        const command = `${this.llamaCliPath} --model ${this.modelPath} --prompt ${escapedPrompt} --system ${escapedSystemMessage} --no-warmup --threads 1 --ctx-size 512`;
+        // Prepare the command with absolute paths (no --system parameter)
+        const command = `${this.llamaCliPath} --model ${this.modelPath} --prompt ${escapedPrompt} --no-warmup --threads 1 --ctx-size 512`;
         
         this.logger.debug(`Executing command: ${command}`);
         
@@ -197,44 +204,77 @@ export class StockMarketService {
           };
         }
 
-        // Try to extract JSON from the response first
-        const jsonMatch = stdout.match(/\{[\s\S]*\}/);
-        let analysis: Partial<StockAnalysisData>;
+        // Clean the response by removing the prompt
+        const cleanedResponse = stdout
+          .replace(prompt, '')  // Remove the input prompt
+          .trim();
         
-        if (jsonMatch) {
-          try {
-            // If we found JSON, try to parse it
-            const parsedJson = JSON.parse(jsonMatch[0]);
-            analysis = {
-              sentiment: parsedJson.sentiment || 'neutral',
-              summary: parsedJson.summary || 'No summary provided',
-              keyPoints: Array.isArray(parsedJson.keyPoints) ? parsedJson.keyPoints : ['No key points provided'],
-              technicalAnalysis: parsedJson.technicalAnalysis || 'No technical analysis provided',
-              riskFactors: Array.isArray(parsedJson.riskFactors) ? parsedJson.riskFactors : ['No risk factors provided'],
-            };
-          } catch (jsonError) {
-            // JSON parsing failed, fall back to text analysis
-            this.logger.warn(`Failed to parse JSON from LLM response: ${jsonError.message}`);
-            throw new Error('JSON parsing failed');
-          }
-        } else {
-          // No JSON found, use the text response as-is
-          throw new Error('No JSON found in response');
+        this.logger.debug(`Raw LLM response (first 100 chars): ${cleanedResponse.substring(0, 100)}...`);
+        
+        // Extract first 1-2 sentences for summary (up to 150 chars)
+        const sentenceEndRegex = /[.!?]\s+/g;
+        const sentences = cleanedResponse.split(sentenceEndRegex);
+        let summary = sentences[0] || '';
+        if (sentences.length > 1 && summary.length < 100) {
+          summary += '. ' + sentences[1];
+        }
+        summary = summary.substring(0, 150);
+        
+        // Try to determine sentiment from keywords
+        let sentiment = 'neutral';
+        const lowerText = cleanedResponse.toLowerCase();
+        
+        const positiveTerms = ['positive', 'bullish', 'uptrend', 'growth', 'increase', 'buy', 'strong', 'opportunity'];
+        const negativeTerms = ['negative', 'bearish', 'downtrend', 'decline', 'decrease', 'sell', 'weak', 'risk', 'caution'];
+        
+        let positiveCount = 0;
+        let negativeCount = 0;
+        
+        positiveTerms.forEach(term => {
+          const matches = lowerText.match(new RegExp(term, 'g'));
+          if (matches) positiveCount += matches.length;
+        });
+        
+        negativeTerms.forEach(term => {
+          const matches = lowerText.match(new RegExp(term, 'g'));
+          if (matches) negativeCount += matches.length;
+        });
+        
+        if (positiveCount > negativeCount + 1) {
+          sentiment = 'positive';
+        } else if (negativeCount > positiveCount + 1) {
+          sentiment = 'negative';
         }
         
-        // Clean up the raw response for safe display
-        const cleanedResponse = stdout
-          .replace(prompt, '')  // Remove the prompt
-          .trim()
-          .substring(0, 1500);  // Limit length to avoid overwhelming the UI
+        // Extract some bullet points from the text
+        const keyPoints: string[] = [];
+        const paragraphs = cleanedResponse.split('\n').filter(p => p.trim().length > 20);
         
-        // Return the complete analysis
+        // Take up to 3 paragraphs and use them as key points
+        for (let i = 0; i < Math.min(3, paragraphs.length); i++) {
+          const paragraph = paragraphs[i].trim();
+          if (paragraph && paragraph !== summary) {
+            // Truncate long paragraphs
+            keyPoints.push(paragraph.length > 100 ? paragraph.substring(0, 100) + '...' : paragraph);
+          }
+        }
+        
+        // If we couldn't extract key points, create some generic ones
+        if (keyPoints.length === 0) {
+          keyPoints.push('See full analysis in the raw response below');
+        }
+        
+        // Return the analysis with the raw response
         return {
-          ...analysis,
+          sentiment,
+          summary,
+          keyPoints,
+          technicalAnalysis: 'Full technical analysis available in the raw AI response below.',
+          riskFactors: ['For complete risk assessment, please refer to the raw AI response.'],
+          llmStatus: 'text_only',
           metrics,
-          llmStatus: 'online',
-          rawLlmResponse: cleanedResponse
-        } as StockAnalysisData;
+          rawLlmResponse: cleanedResponse.substring(0, 2000) // Increased character limit
+        };
         
       } catch (modelError) {
         this.logger.error(`TinyLlama model error or parsing issue: ${modelError.message}`);
