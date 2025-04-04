@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { StockSwarmPlot } from '@/components/StockSwarmPlot';
+import { useState, useMemo } from 'react';
+import { StockSwarmPlot, sectorStocks } from '@/components/StockSwarmPlot';
 import { PriceChart } from '@/components/PriceChart';
 import { VolumeChart } from '@/components/VolumeChart';
 import { StockAnalysis } from '@/components/StockAnalysis';
@@ -76,7 +76,7 @@ const styles = {
 
 export default function Home() {
   const [selectedStock, setSelectedStock] = useState<string>('SPY');
-  const [selectedTimeframe, setSelectedTimeframe] = useState<'1m'>('1m');
+  const [selectedTimeframe, setSelectedTimeframe] = useState<'1y'>('1y');
   const [currentPrice, setCurrentPrice] = useState<number>(0);
   const [priceChange, setPriceChange] = useState<number>(0);
   const [currentVolume, setCurrentVolume] = useState<number>(0);
@@ -120,7 +120,7 @@ export default function Home() {
                 Price Chart: <span style={styles.chartHighlight}>{selectedStock}</span>
               </h2>
               <div style={styles.chartArea}>
-                <PriceChart symbol={selectedStock} timeframe={selectedTimeframe} />
+                <PriceChart symbol={selectedStock} timeframe={selectedTimeframe} sectorStocks = {sectorStocks} />
               </div>
             </div>
 
