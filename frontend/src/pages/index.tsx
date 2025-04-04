@@ -92,6 +92,9 @@ export default function Home() {
         <h1 style={styles.header}>
           Stock Market Dashboard
         </h1>
+        <h2 style={styles.chartTitle}>
+          Hover over a stock to see its details, click the play button to see trends over time. Click to select a stock for further analysis.
+        </h2>
         
         <div>
           {/* Market Overview - Full Width */}
@@ -112,6 +115,11 @@ export default function Home() {
               />
             </div>
           </div>
+
+          <h2 style={styles.chartTitle}>
+            Adjust the time period by clicking the different timeframes below. Hover over the charts to see more details.
+            For the Price Chart, for all stocks except SPY, you can compare the chosen stock against up to five others in the same category. 
+          </h2>
 
           {/* Price and Volume Charts - Side by Side */}
           <div style={styles.chartsRow}>
